@@ -23,6 +23,8 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 
+import { extractTextFromPDF } from "@/lib/pdf"
+
 type UploadType = "note" | "pdf" | "image" | "audio" | "webclip"
 
 interface UploadFile {
@@ -50,6 +52,7 @@ export function UploadZone() {
   const [files, setFiles] = useState<UploadFile[]>([])
   const [isRecording, setIsRecording] = useState(false)
   const [showNoteInput, setShowNoteInput] = useState(false)
+  const [showWebclipInput, setShowWebclipInput] = useState(false)
   const [webclipUrl, setWebclipUrl] = useState("")
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
@@ -60,13 +63,19 @@ export function UploadZone() {
 
     if (file.type === "note") {
       content = file.content || ""
-    } else if (file.type === "pdf") {
-      // PDF processing would happen server-side
-      content = `PDF file: ${file.file?.name}`
+    } else if (file.type === "pdf" && file.file) {
+      try {
+        content = await extractTextFromPDF(file.file)
+      } catch (err) {
+        console.error("PDF extraction failed", err)
+        content = `PDF file: ${file.file.name} (Text extraction failed)`
+      }
     } else if (file.type === "image") {
       content = `Image file: ${file.file?.name}`
     } else if (file.type === "audio") {
       content = `Audio recording`
+    } else if (file.type === "webclip") {
+      content = file.content || ""
     }
 
     return { title, content }
@@ -81,6 +90,19 @@ export function UploadZone() {
 
     try {
       const { title, content } = await processFile(file)
+
+      // In demo mode, we'll just simulate success
+      const isDemoMode = process.env.NEXT_PUBLIC_DEMO_MODE === 'true'
+      
+      if (isDemoMode) {
+        await new Promise(resolve => setTimeout(resolve, 1000))
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === file.id ? { ...f, status: "done" as const } : f
+          )
+        )
+        return
+      }
 
       // Upload to Supabase
       const { data: { user } } = await supabase.auth.getUser()
@@ -223,18 +245,18 @@ export function UploadZone() {
     setShowNoteInput(false)
   }
 
-  const addWebclip = async () => {
-    if (!webclipUrl) return
+  const addWebclip = async (url: string, title?: string) => {
+    if (!url) return
 
     const newFile: UploadFile = {
       id: Math.random().toString(36).substring(7),
       type: "webclip",
-      title: new URL(webclipUrl).hostname,
-      content: webclipUrl,
+      title: title || new URL(url).hostname,
+      content: url,
       status: "pending",
     }
     setFiles((prev) => [...prev, newFile])
-    setWebclipUrl("")
+    setShowWebclipInput(false)
   }
 
   const removeFile = (id: string) => {
@@ -260,7 +282,7 @@ export function UploadZone() {
               if (item.type === "note") {
                 setShowNoteInput(true)
               } else if (item.type === "webclip") {
-                // Show webclip input
+                setShowWebclipInput(true)
               }
             }}
             className="flex flex-col items-center gap-2 p-4 rounded-xl bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
@@ -287,24 +309,6 @@ export function UploadZone() {
             >
               <Mic className="h-4 w-4 mr-2" />
               {isRecording ? "Stop Recording" : "Start Recording"}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Web Clip Input */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex gap-2">
-            <Input
-              placeholder="Paste URL to capture..."
-              value={webclipUrl}
-              onChange={(e) => setWebclipUrl(e.target.value)}
-              className="flex-1"
-            />
-            <Button onClick={addWebclip} disabled={!webclipUrl}>
-              <Link2 className="h-4 w-4 mr-2" />
-              Capture
             </Button>
           </div>
         </CardContent>
@@ -337,6 +341,16 @@ export function UploadZone() {
           <NoteInputModal
             onClose={() => setShowNoteInput(false)}
             onSave={addNote}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Webclip Input Modal */}
+      <AnimatePresence>
+        {showWebclipInput && (
+          <WebclipInputModal
+            onClose={() => setShowWebclipInput(false)}
+            onSave={addWebclip}
           />
         )}
       </AnimatePresence>
@@ -388,7 +402,7 @@ export function UploadZone() {
                             )
                           )
                         }}
-                        className="h-8"
+                        className="h-8 border-none bg-transparent focus-visible:ring-0 px-0 font-medium"
                         placeholder="Title"
                       />
                       {file.type === "note" && (
@@ -404,6 +418,9 @@ export function UploadZone() {
                           placeholder="Write your note..."
                           className="mt-2 h-20 text-sm"
                         />
+                      )}
+                      {file.type === "webclip" && (
+                        <p className="text-xs text-zinc-500 truncate mt-1">{file.content}</p>
                       )}
                     </div>
 
@@ -498,7 +515,7 @@ function NoteInputModal({
                 <Button variant="outline" onClick={onClose}>
                   Cancel
                 </Button>
-                <Button onClick={() => onSave(content, title)}>
+                <Button onClick={() => onSave(content, title)} disabled={!content}>
                   Save Note
                 </Button>
               </div>
@@ -509,3 +526,70 @@ function NoteInputModal({
     </motion.div>
   )
 }
+
+function WebclipInputModal({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void
+  onSave: (url: string, title?: string) => void
+}) {
+  const [url, setUrl] = useState("")
+  const [title, setTitle] = useState("")
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+    >
+      <motion.div
+        initial={{ scale: 0.95, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        exit={{ scale: 0.95, opacity: 0 }}
+        className="w-full max-w-lg"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Card>
+          <CardContent className="p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Capture Web Clip</h3>
+              <Button variant="ghost" size="icon" onClick={onClose}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">URL</label>
+                <Input
+                  placeholder="https://example.com/article"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Title (Optional)</label>
+                <Input
+                  placeholder="Article Title"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={onClose}>
+                  Cancel
+                </Button>
+                <Button onClick={() => onSave(url, title)} disabled={!url}>
+                  Capture
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </motion.div>
+    </motion.div>
+  )
+}
+
